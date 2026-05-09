@@ -482,6 +482,16 @@ def _stop_bot(name: str):
 import asyncio
 
 async def main():
+    os.makedirs("logs", exist_ok=True)
+
+    # Flask дар thread ҷудо
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+
+    # Keep-alive барои Render
+    ping_thread = threading.Thread(target=keep_alive, daemon=True)
+    ping_thread.start()
+
     # Ботҳои аввал оғоз кардан
     bots = load_bots()
     for name, info in bots.items():
@@ -499,17 +509,14 @@ async def main():
     ))
 
     print("🤖 Master Bot оғоз шуд!")
-    await app.run_polling(drop_pending_updates=True)
+
+    # PTB v21 + Python 3.10+ усули дуруст
+    async with app:
+        await app.start()
+        await app.updater.start_polling(drop_pending_updates=True)
+        await asyncio.Event().wait()  # то бесохт кор кунад
+        await app.updater.stop()
+        await app.stop()
 
 if __name__ == "__main__":
-    os.makedirs("logs", exist_ok=True)
-
-    # Flask дар thread ҷудо
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-
-    # Keep-alive барои Render
-    ping_thread = threading.Thread(target=keep_alive, daemon=True)
-    ping_thread.start()
-
     asyncio.run(main())
