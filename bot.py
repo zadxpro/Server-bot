@@ -177,48 +177,89 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_html(main_menu_text(), reply_markup=main_menu_kb())
 
 # ============================================================
+#  ТАЙМЕР — баъд аз вақт бот мерад
+# ============================================================
+_app_ref = None
+
+async def auto_stop_bot(app, bot_name: str, seconds: int, chat_id: int):
+    await asyncio.sleep(seconds)
+    bots = load_bots()
+    if bot_name in bots and is_running(bots[bot_name].get("pid")):
+        _stop_bot(bot_name)
+        h, rem = divmod(seconds, 3600)
+        m, s   = divmod(rem, 60)
+        if h:
+            vaqt = f"{h} соат {m} дақиқа"
+        elif m:
+            vaqt = f"{m} дақиқа"
+        else:
+            vaqt = f"{s} сония"
+        try:
+            await app.bot.send_message(
+                chat_id=chat_id,
+                parse_mode="HTML",
+                text=(
+                    f"⏰ <b>Вақт тамом шуд!</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🤖 Бот: <b>{bot_name}</b>\n"
+                    f"🕒 Вақти кор: <code>{vaqt}</code>\n"
+                    f"🔴 Бот <b>худкор хомӯш шуд!</b>"
+                )
+            )
+        except Exception:
+            pass
+
+# ============================================================
 #  ФАЙЛ ҚАБУЛ КАРДАН — АСОСИИ НАВИ КОД
 # ============================================================
 @admin_only
 async def file_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     doc = update.message.document
-
-    # Танҳо .py файл
     if not doc.file_name.endswith(".py"):
         await update.message.reply_text("❌ Танҳо файлҳои .py қабул мешавад!")
         return
 
     bot_name = doc.file_name.replace(".py", "")
+    file_id  = doc.file_id
 
-    # ── Анимацияи загрузка ──────────────────────────────
-    frames = ["⏳", "🔄", "📥", "💾", "⚙️"]
-    steps = [
-        "📥 Файл дарёфт шуд...",
-        "💾 Файл сервер захира мешавад...",
-        "⚙️ Бот оғоз мешавад...",
-        "🔍 Вазъият тафтиш мешавад...",
-    ]
-
-    msg = await update.message.reply_html(
-        f"<b>{frames[0]} Файл қабул шуд!</b>\n"
+    # ── Аввал вақт пурс (дастӣ) ────────────────────────
+    ctx.user_data["pending_bot"] = {"name": bot_name, "file_id": file_id}
+    await update.message.reply_html(
+        f"📄 Файл: <code>{doc.file_name}</code>\n\n"
+        f"⏰ <b>Чанд вақт бот кор кунад?</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📄 Ном: <code>{doc.file_name}</code>\n\n"
-        f"{steps[0]}"
+        f"Вақтро дастӣ нависед:\n\n"
+        f"<code>1y</code>  — 1 сол\n"
+        f"<code>1mo</code> — 1 моҳ\n"
+        f"<code>1d</code>  — 1 рӯз\n"
+        f"<code>1ch</code> — 1 соат\n"
+        f"<code>30mi</code>— 30 дақиқа\n"
+        f"<code>0</code>   — бе маҳдудият ♾\n\n"
+        f"Мисол: <code>2d 6ch</code> = 2 рӯз ва 6 соат"
     )
 
+# ============================================================
+#  LAUNCH BOT — файл сохтан ва оғоз кардан
+# ============================================================
+async def _launch_bot(q, bot_name, file_id, seconds, chat_id, bot_obj=None):
+    msg = await q.edit_message_text(
+        f"<b>📥 Файл дарёфт шуд...</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🤖 Бот: <code>{bot_name}</code>",
+        parse_mode="HTML"
+    )
     await asyncio.sleep(1)
     await msg.edit_text(
-        f"<b>🔄 Коркард мешавад...</b>\n"
+        f"<b>💾 Файл сервер захира мешавад...</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📄 Ном: <code>{doc.file_name}</code>\n\n"
-        f"{steps[1]}",
+        f"🤖 Бот: <code>{bot_name}</code>",
         parse_mode="HTML"
     )
 
-    # ── Файлро сервер сохт ──────────────────────────────
     try:
-        file = await ctx.bot.get_file(doc.file_id)
-        save_path = os.path.join(BOTS_DIR, doc.file_name)
+        _bot = bot_obj if bot_obj else (q.message.get_bot() if (hasattr(q, "message") and q.message) else None)
+        file = await _bot.get_file(file_id)
+        save_path = os.path.join(BOTS_DIR, f"{bot_name}.py")
         await file.download_to_drive(save_path)
     except Exception as e:
         await msg.edit_text(f"❌ Файл сохта нашуд:\n<code>{e}</code>", parse_mode="HTML")
@@ -228,22 +269,20 @@ async def file_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await msg.edit_text(
         f"<b>⚙️ Бот оғоз мешавад...</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📄 Ном: <code>{doc.file_name}</code>\n\n"
-        f"{steps[2]}",
+        f"🤖 Бот: <code>{bot_name}</code>",
         parse_mode="HTML"
     )
 
-    # ── Агар бот пештар буд, рестарт ──────────────────
     bots = load_bots()
     if bot_name in bots:
         _stop_bot(bot_name)
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.5)
 
-    # ── Бот оғоз кардан ────────────────────────────────
     bots[bot_name] = {
         "path":  save_path,
         "pid":   None,
         "added": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "timer": seconds,
     }
     save_bots(bots)
     pid = _start_bot(bot_name, save_path)
@@ -252,42 +291,47 @@ async def file_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await msg.edit_text(
         f"<b>🔍 Вазъият тафтиш мешавад...</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📄 Ном: <code>{doc.file_name}</code>",
+        f"🤖 Бот: <code>{bot_name}</code>",
         parse_mode="HTML"
     )
-
     await asyncio.sleep(2)
 
-    # ── Натиҷа ─────────────────────────────────────────
+    if seconds > 0:
+        h, rem = divmod(seconds, 3600)
+        m, _   = divmod(rem, 60)
+        timer_line = f"⏰ Таймер : <code>{h} соат {m} дақ</code>\n" if h else f"⏰ Таймер : <code>{m} дақиқа</code>\n"
+    else:
+        timer_line = "♾ Таймер : <b>Бе маҳдудият</b>\n"
+
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("📋 Рӯйхат", callback_data="list"),
+        InlineKeyboardButton("🏠 Меню",   callback_data="main"),
+    ]])
+
     if pid and is_running(pid):
-        status_text = (
+        await msg.edit_text(
             f"╔══════════════════════════╗\n"
             f"║  ✅  БОТ ФАОЛ ШУД!  ✅  ║\n"
             f"╚══════════════════════════╝\n\n"
             f"🤖 Ном   : <b>{bot_name}</b>\n"
-            f"📁 Файл  : <code>{save_path}</code>\n"
             f"🆔 PID   : <code>{pid}</code>\n"
             f"🟢 Вазъ  : <b>Фаъол</b>\n"
-            f"🕒 Вақт  : <code>{now_str()}</code>\n"
+            f"{timer_line}"
+            f"🕒 Вақт  : <code>{now_str()}</code>",
+            parse_mode="HTML", reply_markup=kb
         )
+        if seconds > 0 and _app_ref:
+            asyncio.create_task(auto_stop_bot(_app_ref, bot_name, seconds, chat_id))
     else:
-        status_text = (
+        await msg.edit_text(
             f"╔══════════════════════════╗\n"
             f"║  ⚠️  ХАТОГӢ ЮЗ ДОД  ⚠️  ║\n"
             f"╚══════════════════════════╝\n\n"
-            f"🤖 Ном   : <b>{bot_name}</b>\n"
-            f"📁 Файл  : <code>{save_path}</code>\n"
-            f"🔴 Вазъ  : <b>Оғоз нашуд</b>\n"
-            f"📋 Логро тафтиш кун: <code>logs/{bot_name}.log</code>\n"
+            f"🤖 Ном  : <b>{bot_name}</b>\n"
+            f"🔴 Вазъ : <b>Оғоз нашуд</b>\n"
+            f"📋 Лог : <code>logs/{bot_name}.log</code>",
+            parse_mode="HTML", reply_markup=kb
         )
-
-    kb = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("📋 Рӯйхат",   callback_data="list"),
-            InlineKeyboardButton("🏠 Меню",      callback_data="main"),
-        ]
-    ])
-    await msg.edit_text(status_text, parse_mode="HTML", reply_markup=kb)
 
 # ============================================================
 #  CALLBACK HANDLER
@@ -487,10 +531,84 @@ async def show_server_status(q):
     await q.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
 
 # ============================================================
-#  ПАЁМИ МАТНӢ
+#  ВАҚТРО ТАҲЛИЛ КАРДАН
+# ============================================================
+def parse_duration(text: str) -> int:
+    """
+    1y=сол, 1mo=моҳ, 1d=рӯз, 1ch=соат, 1mi=дақиқа
+    Метавонад омехта бошад: 2d 6ch = 2 рӯз 6 соат
+    Агар 0 бошад → бе вақт (0 баргардонад)
+    """
+    text = text.strip().lower()
+    if text == "0":
+        return 0
+
+    import re
+    total = 0
+    mapping = [
+        (r"(\d+)\s*y\b",  365 * 24 * 3600),   # сол
+        (r"(\d+)\s*mo\b", 30  * 24 * 3600),   # моҳ
+        (r"(\d+)\s*d\b",  24  * 3600),         # рӯз
+        (r"(\d+)\s*ch\b", 3600),               # соат
+        (r"(\d+)\s*mi\b", 60),                 # дақиқа
+    ]
+    for pattern, mult in mapping:
+        for m in re.finditer(pattern, text):
+            total += int(m.group(1)) * mult
+
+    return total
+
+def seconds_to_human(seconds: int) -> str:
+    if seconds == 0:
+        return "♾ Бе маҳдудият"
+    parts = []
+    for unit, label in [(365*24*3600, "сол"), (30*24*3600, "моҳ"),
+                        (24*3600, "рӯз"), (3600, "соат"), (60, "дақиқа")]:
+        if seconds >= unit:
+            parts.append(f"{seconds // unit} {label}")
+            seconds %= unit
+    return " ".join(parts) if parts else f"{seconds} сония"
+
+# ============================================================
+#  ПАЁМИ МАТНӢ — вақт ё хабар
 # ============================================================
 @admin_only
 async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    pending = ctx.user_data.get("pending_bot")
+
+    if pending:
+        text     = update.message.text.strip()
+        seconds  = parse_duration(text)
+        bot_name = pending["name"]
+        file_id  = pending["file_id"]
+        chat_id  = update.message.chat_id
+
+        if seconds is None:
+            await update.message.reply_html(
+                "❌ Формат нодуруст!\n\n"
+                "Мисол: <code>1d 6ch</code> ё <code>2ch</code> ё <code>0</code>"
+            )
+            return
+
+        ctx.user_data.pop("pending_bot", None)
+        human = seconds_to_human(seconds)
+
+        msg = await update.message.reply_html(
+            f"✅ Вақт қабул шуд: <b>{human}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🚀 Бот оғоз мешавад..."
+        )
+        await asyncio.sleep(1)
+
+        # Simulate query object for _launch_bot
+        class FakeQuery:
+            message = None
+            async def edit_message_text(self, text, **kwargs):
+                return await msg.edit_text(text, **kwargs)
+
+        await _launch_bot(FakeQuery(), bot_name, file_id, seconds, chat_id, bot_obj=ctx.bot)
+        return
+
     await update.message.reply_html(
         "📎 Барои илова кардани бот — файли <code>.py</code> -ро фирист!\n\n"
         "Ё /start ба кун.",
@@ -514,7 +632,9 @@ async def main():
             print(f"[AUTO-START] {name}")
             _start_bot(name, info["path"])
 
+    global _app_ref
     app = Application.builder().token(TOKEN).build()
+    _app_ref = app
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("menu",  cmd_start))
     app.add_handler(CallbackQueryHandler(callback_handler))
