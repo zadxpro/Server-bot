@@ -3,13 +3,12 @@ import json
 import subprocess
 import threading
 import time
+import asyncio
 import psutil
 import requests
 from datetime import datetime
 from flask import Flask
-from telegram import (
-    Update, InlineKeyboardButton, InlineKeyboardMarkup
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     ContextTypes, MessageHandler, filters
@@ -18,13 +17,17 @@ from telegram.ext import (
 # ============================================================
 #  КОНФИГ
 # ============================================================
-TOKEN       = os.environ.get("MASTER_TOKEN", "8787496445:AAFKrV_Lm_55YriYb8Y6KVG56_HPEbv74ns")
-ADMIN_ID    = 7424107874
-BOTS_FILE   = "bots.json"
-RENDER_URL  = os.environ.get("RENDER_EXTERNAL_URL", "")
+TOKEN      = os.environ.get("MASTER_TOKEN", "8787496445:AAFKrV_Lm_55YriYb8Y6KVG56_HPEbv74ns")
+ADMIN_ID   = 7424107874
+BOTS_FILE  = "bots.json"
+RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
+BOTS_DIR   = "bots"
+
+os.makedirs(BOTS_DIR, exist_ok=True)
+os.makedirs("logs", exist_ok=True)
 
 # ============================================================
-#  ФЛASK — барои Render зинда монад
+#  FLASK — барои Render зинда монад
 # ============================================================
 flask_app = Flask(__name__)
 
@@ -41,20 +44,17 @@ def run_flask():
     flask_app.run(host="0.0.0.0", port=port)
 
 def keep_alive():
-    """Ҳар 30 сония серверро ping мекунад то Render хомӯш накунад"""
     if not RENDER_URL:
-        print("[KEEP-ALIVE] RENDER_EXTERNAL_URL танзим нашудааст, skip.")
         return
     while True:
         try:
-            r = requests.get(f"{RENDER_URL}/health", timeout=10)
-            print(f"[KEEP-ALIVE] ✅ ping → {r.status_code}")
-        except Exception as e:
-            print(f"[KEEP-ALIVE] ❌ хато: {e}")
-        time.sleep(30)  # 30 сония
+            requests.get(f"{RENDER_URL}/health", timeout=10)
+        except Exception:
+            pass
+        time.sleep(30)
 
 # ============================================================
-#  ИДОРАКУНИИ БОТҲО (JSON)
+#  ИДОРАКУНИИ БОТҲО
 # ============================================================
 def load_bots() -> dict:
     if not os.path.exists(BOTS_FILE):
@@ -66,35 +66,45 @@ def save_bots(bots: dict):
     with open(BOTS_FILE, "w") as f:
         json.dump(bots, f, indent=2)
 
-# Процессҳои зинда
-processes: dict[str, subprocess.Popen] = {}
+processes: dict = {}
 
-def is_running(pid: int) -> bool:
+def is_running(pid) -> bool:
     try:
-        return psutil.pid_exists(pid) and psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
+        return pid and psutil.pid_exists(int(pid)) and \
+               psutil.Process(int(pid)).status() != psutil.STATUS_ZOMBIE
     except Exception:
         return False
 
-# ============================================================
-#  EMOJI & HELPERS
-# ============================================================
-STATUS_ON  = "🟢"
-STATUS_OFF = "🔴"
-STATUS_ERR = "🟡"
+def _start_bot(name: str, path: str):
+    try:
+        log = open(f"logs/{name}.log", "a")
+        proc = subprocess.Popen(["python3", path], stdout=log, stderr=subprocess.STDOUT)
+        processes[name] = proc
+        bots = load_bots()
+        if name in bots:
+            bots[name]["pid"] = proc.pid
+            save_bots(bots)
+        return proc.pid
+    except Exception as e:
+        print(f"[ERROR] {name}: {e}")
+        return None
 
-def bot_status_icon(name: str) -> str:
+def _stop_bot(name: str):
+    proc = processes.get(name)
+    if proc:
+        try:
+            proc.terminate()
+            proc.wait(timeout=5)
+        except Exception:
+            proc.kill()
+        processes.pop(name, None)
     bots = load_bots()
-    info = bots.get(name, {})
-    pid  = info.get("pid")
-    if pid and is_running(pid):
-        return STATUS_ON
-    return STATUS_OFF
-
-def now_str() -> str:
-    return datetime.now().strftime("%H:%M:%S")
+    if name in bots:
+        bots[name]["pid"] = None
+        save_bots(bots)
 
 # ============================================================
-#  ТЕКСТҲОИ ЗЕБО
+#  HELPERS
 # ============================================================
 HEADER = (
     "╔══════════════════════════╗\n"
@@ -102,10 +112,18 @@ HEADER = (
     "╚══════════════════════════╝\n"
 )
 
-def main_menu_text() -> str:
+def now_str():
+    return datetime.now().strftime("%H:%M:%S")
+
+def bot_icon(name):
+    bots = load_bots()
+    pid = bots.get(name, {}).get("pid")
+    return "🟢" if is_running(pid) else "🔴"
+
+def main_menu_text():
     bots  = load_bots()
     total = len(bots)
-    alive = sum(1 for b in bots.values() if b.get("pid") and is_running(b["pid"]))
+    alive = sum(1 for b in bots.values() if is_running(b.get("pid")))
     return (
         f"{HEADER}\n"
         f"👑 <b>Администратор панел</b>\n"
@@ -115,37 +133,36 @@ def main_menu_text() -> str:
         f"🔴 Хомӯш         : <b>{total - alive}</b>\n"
         f"🕒 Вақт           : <code>{now_str()}</code>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📎 Файли .py фирист — бот ба таври худкор илова мешавад!\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"Амалро интихоб кунед 👇"
     )
 
-def main_menu_kb() -> InlineKeyboardMarkup:
+def main_menu_kb():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("📋 Рӯйхати ботҳо",  callback_data="list"),
-            InlineKeyboardButton("➕ Бот илова кун",   callback_data="add_prompt"),
+            InlineKeyboardButton("📋 Рӯйхати ботҳо",    callback_data="list"),
+            InlineKeyboardButton("📊 Вазъияти сервер",   callback_data="server_status"),
         ],
         [
-            InlineKeyboardButton("▶️ Ҳама ботро оғоз", callback_data="start_all"),
-            InlineKeyboardButton("⏹ Ҳама ботро бандкун", callback_data="stop_all"),
+            InlineKeyboardButton("▶️ Ҳама оғоз",         callback_data="start_all"),
+            InlineKeyboardButton("⏹ Ҳама бандкун",       callback_data="stop_all"),
         ],
         [
-            InlineKeyboardButton("🔄 Ҳама ботро рестарт", callback_data="restart_all"),
-            InlineKeyboardButton("📊 Вазъияти сервер",    callback_data="server_status"),
-        ],
-        [
-            InlineKeyboardButton("🔃 Навсозии меню",  callback_data="refresh"),
+            InlineKeyboardButton("🔄 Ҳама рестарт",      callback_data="restart_all"),
+            InlineKeyboardButton("🔃 Навсозӣ",           callback_data="refresh"),
         ],
     ])
 
 # ============================================================
-#  GUARD — танҳо ADMIN
+#  GUARD
 # ============================================================
 def admin_only(func):
     async def wrapper(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        uid = (update.effective_user or update.callback_query.from_user).id
-        if uid != ADMIN_ID:
+        user = update.effective_user
+        if not user or user.id != ADMIN_ID:
             if update.message:
-                await update.message.reply_text("⛔ Шумо дастрасӣ надоред!")
+                await update.message.reply_text("⛔ Дастрасӣ нест!")
             elif update.callback_query:
                 await update.callback_query.answer("⛔ Танҳо Admin!", show_alert=True)
             return
@@ -157,10 +174,120 @@ def admin_only(func):
 # ============================================================
 @admin_only
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_html(
-        main_menu_text(),
-        reply_markup=main_menu_kb()
+    await update.message.reply_html(main_menu_text(), reply_markup=main_menu_kb())
+
+# ============================================================
+#  ФАЙЛ ҚАБУЛ КАРДАН — АСОСИИ НАВИ КОД
+# ============================================================
+@admin_only
+async def file_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    doc = update.message.document
+
+    # Танҳо .py файл
+    if not doc.file_name.endswith(".py"):
+        await update.message.reply_text("❌ Танҳо файлҳои .py қабул мешавад!")
+        return
+
+    bot_name = doc.file_name.replace(".py", "")
+
+    # ── Анимацияи загрузка ──────────────────────────────
+    frames = ["⏳", "🔄", "📥", "💾", "⚙️"]
+    steps = [
+        "📥 Файл дарёфт шуд...",
+        "💾 Файл сервер захира мешавад...",
+        "⚙️ Бот оғоз мешавад...",
+        "🔍 Вазъият тафтиш мешавад...",
+    ]
+
+    msg = await update.message.reply_html(
+        f"<b>{frames[0]} Файл қабул шуд!</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📄 Ном: <code>{doc.file_name}</code>\n\n"
+        f"{steps[0]}"
     )
+
+    await asyncio.sleep(1)
+    await msg.edit_text(
+        f"<b>🔄 Коркард мешавад...</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📄 Ном: <code>{doc.file_name}</code>\n\n"
+        f"{steps[1]}",
+        parse_mode="HTML"
+    )
+
+    # ── Файлро сервер сохт ──────────────────────────────
+    try:
+        file = await ctx.bot.get_file(doc.file_id)
+        save_path = os.path.join(BOTS_DIR, doc.file_name)
+        await file.download_to_drive(save_path)
+    except Exception as e:
+        await msg.edit_text(f"❌ Файл сохта нашуд:\n<code>{e}</code>", parse_mode="HTML")
+        return
+
+    await asyncio.sleep(1)
+    await msg.edit_text(
+        f"<b>⚙️ Бот оғоз мешавад...</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📄 Ном: <code>{doc.file_name}</code>\n\n"
+        f"{steps[2]}",
+        parse_mode="HTML"
+    )
+
+    # ── Агар бот пештар буд, рестарт ──────────────────
+    bots = load_bots()
+    if bot_name in bots:
+        _stop_bot(bot_name)
+        await asyncio.sleep(1)
+
+    # ── Бот оғоз кардан ────────────────────────────────
+    bots[bot_name] = {
+        "path":  save_path,
+        "pid":   None,
+        "added": datetime.now().strftime("%Y-%m-%d %H:%M"),
+    }
+    save_bots(bots)
+    pid = _start_bot(bot_name, save_path)
+
+    await asyncio.sleep(2)
+    await msg.edit_text(
+        f"<b>🔍 Вазъият тафтиш мешавад...</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📄 Ном: <code>{doc.file_name}</code>",
+        parse_mode="HTML"
+    )
+
+    await asyncio.sleep(2)
+
+    # ── Натиҷа ─────────────────────────────────────────
+    if pid and is_running(pid):
+        status_text = (
+            f"╔══════════════════════════╗\n"
+            f"║  ✅  БОТ ФАОЛ ШУД!  ✅  ║\n"
+            f"╚══════════════════════════╝\n\n"
+            f"🤖 Ном   : <b>{bot_name}</b>\n"
+            f"📁 Файл  : <code>{save_path}</code>\n"
+            f"🆔 PID   : <code>{pid}</code>\n"
+            f"🟢 Вазъ  : <b>Фаъол</b>\n"
+            f"🕒 Вақт  : <code>{now_str()}</code>\n"
+        )
+    else:
+        status_text = (
+            f"╔══════════════════════════╗\n"
+            f"║  ⚠️  ХАТОГӢ ЮЗ ДОД  ⚠️  ║\n"
+            f"╚══════════════════════════╝\n\n"
+            f"🤖 Ном   : <b>{bot_name}</b>\n"
+            f"📁 Файл  : <code>{save_path}</code>\n"
+            f"🔴 Вазъ  : <b>Оғоз нашуд</b>\n"
+            f"📋 Логро тафтиш кун: <code>logs/{bot_name}.log</code>\n"
+        )
+
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📋 Рӯйхат",   callback_data="list"),
+            InlineKeyboardButton("🏠 Меню",      callback_data="main"),
+        ]
+    ])
+    await msg.edit_text(status_text, parse_mode="HTML", reply_markup=kb)
 
 # ============================================================
 #  CALLBACK HANDLER
@@ -171,106 +298,76 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     data = q.data
     await q.answer()
 
-    # ── REFRESH / ГЛАВНАЯ ──────────────────────────────────
     if data in ("refresh", "main"):
-        await q.edit_message_text(
-            main_menu_text(), parse_mode="HTML",
-            reply_markup=main_menu_kb()
-        )
+        await q.edit_message_text(main_menu_text(), parse_mode="HTML",
+                                   reply_markup=main_menu_kb())
 
-    # ── РӮЙХАТ ────────────────────────────────────────────
     elif data == "list":
         await show_bot_list(q)
 
-    # ── ВАЗЪИЯТИ СЕРВЕР ───────────────────────────────────
     elif data == "server_status":
         await show_server_status(q)
 
-    # ── ИЛОВА КАРДАНИ БОТ ─────────────────────────────────
-    elif data == "add_prompt":
-        ctx.user_data["waiting"] = "add_bot"
-        kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("🔙 Бозгашт", callback_data="main")
-        ]])
-        await q.edit_message_text(
-            f"{HEADER}\n"
-            "➕ <b>Бот илова кардан</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            "Формат паёми худро бифиристед:\n\n"
-            "<code>ном | масири_файл.py</code>\n\n"
-            "Мисол:\n"
-            "<code>shopbot | bots/shop_bot.py</code>",
-            parse_mode="HTML", reply_markup=kb
-        )
-
-    # ── START ALL ─────────────────────────────────────────
     elif data == "start_all":
         bots = load_bots()
         started = 0
         for name, info in bots.items():
-            pid = info.get("pid")
-            if not (pid and is_running(pid)):
+            if not is_running(info.get("pid")):
                 _start_bot(name, info["path"])
                 started += 1
         await q.answer(f"✅ {started} бот оғоз шуд!", show_alert=True)
         await q.edit_message_text(main_menu_text(), parse_mode="HTML",
                                    reply_markup=main_menu_kb())
 
-    # ── STOP ALL ──────────────────────────────────────────
     elif data == "stop_all":
-        bots = load_bots()
-        stopped = 0
+        stopped = len(processes)
         for name in list(processes.keys()):
             _stop_bot(name)
-            stopped += 1
         await q.answer(f"⏹ {stopped} бот хомӯш шуд!", show_alert=True)
         await q.edit_message_text(main_menu_text(), parse_mode="HTML",
                                    reply_markup=main_menu_kb())
 
-    # ── RESTART ALL ───────────────────────────────────────
     elif data == "restart_all":
         bots = load_bots()
         for name, info in bots.items():
             _stop_bot(name)
-            time.sleep(0.5)
+            time.sleep(0.3)
             _start_bot(name, info["path"])
         await q.answer(f"🔄 {len(bots)} бот рестарт шуд!", show_alert=True)
         await q.edit_message_text(main_menu_text(), parse_mode="HTML",
                                    reply_markup=main_menu_kb())
 
-    # ── АМАЛҲОИ БОТ ───────────────────────────────────────
     elif data.startswith("bot_"):
-        name = data[4:]
-        await show_bot_detail(q, name)
+        await show_bot_detail(q, data[4:])
 
     elif data.startswith("start_"):
         name = data[6:]
         bots = load_bots()
         if name in bots:
             _start_bot(name, bots[name]["path"])
-            await q.answer(f"✅ {name} оғоз шуд!", show_alert=True)
         await show_bot_detail(q, name)
 
     elif data.startswith("stop_"):
-        name = data[5:]
-        _stop_bot(name)
-        await q.answer(f"⏹ {name} хомӯш шуд!", show_alert=True)
-        await show_bot_detail(q, name)
+        _stop_bot(data[5:])
+        await show_bot_detail(q, data[5:])
 
     elif data.startswith("restart_"):
         name = data[8:]
         bots = load_bots()
         if name in bots:
             _stop_bot(name)
-            time.sleep(0.5)
+            time.sleep(0.3)
             _start_bot(name, bots[name]["path"])
-            await q.answer(f"🔄 {name} рестарт шуд!", show_alert=True)
         await show_bot_detail(q, name)
 
     elif data.startswith("delete_"):
         name = data[7:]
         _stop_bot(name)
         bots = load_bots()
+        # Файлро ҳам ҳазф кун
+        path = bots.get(name, {}).get("path", "")
+        if path and os.path.exists(path):
+            os.remove(path)
         bots.pop(name, None)
         save_bots(bots)
         await q.answer(f"🗑 {name} ҳазф шуд!", show_alert=True)
@@ -283,30 +380,25 @@ async def show_bot_list(q):
     bots = load_bots()
     if not bots:
         kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("➕ Бот илова кун", callback_data="add_prompt"),
-            InlineKeyboardButton("🔙 Бозгашт",       callback_data="main"),
+            InlineKeyboardButton("🔙 Бозгашт", callback_data="main")
         ]])
         await q.edit_message_text(
-            f"{HEADER}\n📋 <b>Ботҳо мавҷуд нест</b>\n\nАввал бот илова кунед!",
+            f"{HEADER}\n📋 <b>Ботҳо мавҷуд нест</b>\n\n"
+            "📎 Файли .py -ро ба чат фирист!",
             parse_mode="HTML", reply_markup=kb
         )
         return
 
     rows = []
     for name in bots:
-        icon = bot_status_icon(name)
         rows.append([InlineKeyboardButton(
-            f"{icon} {name}", callback_data=f"bot_{name}"
+            f"{bot_icon(name)} {name}", callback_data=f"bot_{name}"
         )])
-    rows.append([
-        InlineKeyboardButton("➕ Бот илова кун", callback_data="add_prompt"),
-        InlineKeyboardButton("🔙 Бозгашт",       callback_data="main"),
-    ])
+    rows.append([InlineKeyboardButton("🔙 Бозгашт", callback_data="main")])
 
     text = f"{HEADER}\n📋 <b>Рӯйхати ботҳо</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
     for name, info in bots.items():
-        icon = bot_status_icon(name)
-        text += f"{icon} <code>{name}</code> — <i>{info['path']}</i>\n"
+        text += f"{bot_icon(name)} <b>{name}</b>\n"
 
     await q.edit_message_text(text, parse_mode="HTML",
                                reply_markup=InlineKeyboardMarkup(rows))
@@ -322,44 +414,42 @@ async def show_bot_detail(q, name: str):
         return
 
     pid     = info.get("pid")
-    running = pid and is_running(pid)
-    icon    = STATUS_ON if running else STATUS_OFF
-    added   = info.get("added", "—")
+    running = is_running(pid)
+    icon    = "🟢" if running else "🔴"
 
     try:
-        proc = psutil.Process(pid) if running else None
+        proc = psutil.Process(int(pid)) if running else None
         cpu  = f"{proc.cpu_percent(interval=0.1):.1f}%" if proc else "—"
         mem  = f"{proc.memory_info().rss / 1024 / 1024:.1f} MB" if proc else "—"
     except Exception:
         cpu = mem = "—"
 
     text = (
-        f"{HEADER}\n"
+        f"{HEADER}"
         f"🤖 <b>{name}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📁 Файл   : <code>{info['path']}</code>\n"
-        f"🔵 Вазъ   : {icon} {'Фаъол' if running else 'Хомӯш'}\n"
-        f"🆔 PID    : <code>{pid or '—'}</code>\n"
-        f"🖥 CPU    : <code>{cpu}</code>\n"
-        f"💾 RAM    : <code>{mem}</code>\n"
-        f"📅 Илова  : <code>{added}</code>\n"
+        f"📁 Файл  : <code>{info['path']}</code>\n"
+        f"🔵 Вазъ  : {icon} {'Фаъол' if running else 'Хомӯш'}\n"
+        f"🆔 PID   : <code>{pid or '—'}</code>\n"
+        f"🖥 CPU   : <code>{cpu}</code>\n"
+        f"💾 RAM   : <code>{mem}</code>\n"
+        f"📅 Илова : <code>{info.get('added', '—')}</code>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
     )
 
     if running:
-        action_btns = [
+        btns = [
             InlineKeyboardButton("⏹ Бандкун",  callback_data=f"stop_{name}"),
             InlineKeyboardButton("🔄 Рестарт",  callback_data=f"restart_{name}"),
         ]
     else:
-        action_btns = [
+        btns = [
             InlineKeyboardButton("▶️ Оғоз кун", callback_data=f"start_{name}"),
             InlineKeyboardButton("🗑 Ҳазф кун",  callback_data=f"delete_{name}"),
         ]
 
-    kb = InlineKeyboardMarkup([
-        action_btns,
-        [InlineKeyboardButton("🔙 Рӯйхат", callback_data="list")],
+    kb = InlineKeyboardMarkup([btns,
+        [InlineKeyboardButton("🔙 Рӯйхат", callback_data="list")]
     ])
     await q.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
 
@@ -374,20 +464,19 @@ async def show_server_status(q):
     h, rem = divmod(int(uptime), 3600)
     m, s   = divmod(rem, 60)
 
-    def bar(pct: float, w: int = 10) -> str:
-        filled = int(pct / 100 * w)
-        return "█" * filled + "░" * (w - filled)
+    def bar(p, w=10):
+        f = int(p / 100 * w)
+        return "█" * f + "░" * (w - f)
 
     text = (
-        f"{HEADER}\n"
+        f"{HEADER}"
         f"📊 <b>Вазъияти сервер</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🖥 CPU  : <code>{bar(cpu_p)} {cpu_p:.1f}%</code>\n"
         f"💾 RAM  : <code>{bar(ram.percent)} {ram.percent:.1f}%</code>\n"
         f"         {ram.used//1024//1024} MB / {ram.total//1024//1024} MB\n"
         f"💿 DISK : <code>{bar(disk.percent)} {disk.percent:.1f}%</code>\n"
-        f"         {disk.used//1024//1024//1024} GB / {disk.total//1024//1024//1024} GB\n"
-        f"⏱ Uptime: <code>{h}с {m}д {s}сония</code>\n"
+        f"⏱ Uptime: <code>{h}с {m}д {s}сон</code>\n"
         f"🕒 Вақт : <code>{now_str()}</code>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
     )
@@ -398,123 +487,45 @@ async def show_server_status(q):
     await q.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
 
 # ============================================================
-#  БОТ ИЛОВА КАРДАН (ПАЁМ)
+#  ПАЁМИ МАТНӢ
 # ============================================================
 @admin_only
-async def message_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if ctx.user_data.get("waiting") != "add_bot":
-        return
-
-    text = update.message.text.strip()
-    if "|" not in text:
-        await update.message.reply_html(
-            "❌ Формат нодуруст!\n\n"
-            "Лутфан чунин нависед:\n"
-            "<code>ном | масири_файл.py</code>"
-        )
-        return
-
-    parts = [p.strip() for p in text.split("|", 1)]
-    name, path = parts[0], parts[1]
-
-    if not name or not path:
-        await update.message.reply_text("❌ Ном ё масир холӣ аст!")
-        return
-
-    bots = load_bots()
-    bots[name] = {
-        "path":  path,
-        "pid":   None,
-        "added": datetime.now().strftime("%Y-%m-%d %H:%M"),
-    }
-    save_bots(bots)
-    ctx.user_data.pop("waiting", None)
-
-    kb = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(f"▶️ {name} оғоз кун", callback_data=f"start_{name}"),
-            InlineKeyboardButton("📋 Рӯйхат",           callback_data="list"),
-        ],
-        [InlineKeyboardButton("🏠 Меню", callback_data="main")],
-    ])
+async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_html(
-        f"✅ <b>{name}</b> илова шуд!\n\n"
-        f"📁 Файл: <code>{path}</code>\n\n"
-        "Ҳоло оғоз карда метавонед 👆",
-        reply_markup=kb
+        "📎 Барои илова кардани бот — файли <code>.py</code> -ро фирист!\n\n"
+        "Ё /start ба кун.",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🏠 Меню", callback_data="main")
+        ]])
     )
-
-# ============================================================
-#  ИДОРАКУНИИ ПРОЦЕССҲО
-# ============================================================
-def _start_bot(name: str, path: str):
-    try:
-        proc = subprocess.Popen(
-            ["python3", path],
-            stdout=open(f"logs/{name}.log", "a"),
-            stderr=subprocess.STDOUT
-        )
-        processes[name] = proc
-        bots = load_bots()
-        if name in bots:
-            bots[name]["pid"] = proc.pid
-            save_bots(bots)
-    except Exception as e:
-        print(f"[ERROR] {name} оғоз нашуд: {e}")
-
-def _stop_bot(name: str):
-    proc = processes.get(name)
-    if proc:
-        try:
-            proc.terminate()
-            proc.wait(timeout=5)
-        except Exception:
-            proc.kill()
-        del processes[name]
-    bots = load_bots()
-    if name in bots:
-        bots[name]["pid"] = None
-        save_bots(bots)
 
 # ============================================================
 #  АСОСӢ
 # ============================================================
-import asyncio
-
 async def main():
-    os.makedirs("logs", exist_ok=True)
+    # Flask
+    threading.Thread(target=run_flask, daemon=True).start()
+    # Keep-alive
+    threading.Thread(target=keep_alive, daemon=True).start()
 
-    # Flask дар thread ҷудо
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-
-    # Keep-alive барои Render
-    ping_thread = threading.Thread(target=keep_alive, daemon=True)
-    ping_thread.start()
-
-    # Ботҳои аввал оғоз кардан
-    bots = load_bots()
-    for name, info in bots.items():
+    # Ботҳои аввалро оғоз кун
+    for name, info in load_bots().items():
         if os.path.exists(info["path"]):
             print(f"[AUTO-START] {name}")
             _start_bot(name, info["path"])
 
-    # Telegram Application
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("menu",  cmd_start))
     app.add_handler(CallbackQueryHandler(callback_handler))
-    app.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND, message_handler
-    ))
+    app.add_handler(MessageHandler(filters.Document.ALL, file_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
     print("🤖 Master Bot оғоз шуд!")
-
-    # PTB v21 + Python 3.10+ усули дуруст
     async with app:
         await app.start()
         await app.updater.start_polling(drop_pending_updates=True)
-        await asyncio.Event().wait()  # то бесохт кор кунад
+        await asyncio.Event().wait()
         await app.updater.stop()
         await app.stop()
 
